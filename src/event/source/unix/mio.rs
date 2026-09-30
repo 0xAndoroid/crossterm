@@ -433,6 +433,10 @@ impl Iterator for Parser {
 }
 
 #[cfg(test)]
+#[path = "../color_report_tests.rs"]
+mod color_report_tests;
+
+#[cfg(test)]
 #[path = "../secondary_device_attributes_tests.rs"]
 mod secondary_device_attributes_tests;
 

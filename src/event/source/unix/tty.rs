@@ -160,10 +160,8 @@ impl EventSource for UnixInternalEventSource {
                 loop {
                     let read_count = read_complete(&self.tty, &mut self.tty_buffer)?;
                     if read_count > 0 {
-                        self.parser.advance(
-                            &self.tty_buffer[..read_count],
-                            read_count == TTY_BUFFER_SIZE,
-                        );
+                        self.parser
+                            .buffer_external_input(&self.tty_buffer[..read_count]);
                     }
 
                     if let Some(event) = self.parser.next() {
@@ -328,6 +326,10 @@ impl Parser {
         }
     }
 
+    /// Parse terminal input, holding a trailing lone Escape for a bounded continuation window.
+    ///
+    /// A read boundary cannot tell the Escape key from the start of a control sequence, so live
+    /// reads and replayed input share this path.
     fn buffer_external_input(&mut self, buffer: &[u8]) {
         self.advance(buffer, true);
         if self.buffer.as_slice() == b"\x1b" {
@@ -440,6 +442,15 @@ impl Parser {
             }
             let more = idx + 1 < buffer.len() || more;
 
+            // A pending Escape followed by another Escape is a separate key press; the
+            // stateless parser would otherwise read ESC ESC as one Escape.
+            if self.buffer.as_slice() == b"\x1b" && *byte == b'\x1b' {
+                self.internal_events
+                    .push_back(InternalEvent::Event(Event::Key(
+                        crate::event::KeyCode::Esc.into(),
+                    )));
+                self.buffer.clear();
+            }
             self.buffer.push(*byte);
 
             match parse_event(&self.buffer, more) {
@@ -496,7 +507,7 @@ mod tests {
     use crate::terminal::sys::file_descriptor::FileDesc;
     use std::{io::Write, os::unix::net::UnixStream};
 
-    fn source_with_input() -> (UnixInternalEventSource, UnixStream) {
+    pub(super) fn source_with_input() -> (UnixInternalEventSource, UnixStream) {
         let (reader, writer) = UnixStream::pair().unwrap();
         #[cfg(feature = "libc")]
         let reader = {

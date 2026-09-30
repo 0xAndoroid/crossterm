@@ -1,6 +1,11 @@
 //! Terminal color reports interleaved with typed input surface as events and never become keys.
 
+use std::io::Write;
+use std::time::Duration;
+
+use super::tests::source_with_input;
 use super::Parser;
+use crate::event::source::EventSource;
 use crate::event::{ColorReport, ColorScheme, Event, InternalEvent, KeyCode};
 use crate::style::Color;
 
@@ -66,5 +71,45 @@ fn unrecognized_color_replies_produce_no_events() {
             Event::Key(KeyCode::Char('c').into()),
             Event::Key(KeyCode::Char('d').into()),
         ]
+    );
+}
+
+/// Deliver `input` one byte per read through a live source and collect the public events.
+fn read_live_byte_by_byte(input: &[u8]) -> Vec<Event> {
+    let (mut source, mut writer) = source_with_input();
+    let mut events = Vec::new();
+    for byte in input {
+        writer.write_all(std::slice::from_ref(byte)).unwrap();
+        while let Some(event) = source.try_read(Some(Duration::from_millis(1))).unwrap() {
+            events.extend(event.into_event());
+        }
+    }
+    events
+}
+
+#[test]
+fn live_color_reports_split_after_escape_keep_keys_intact() {
+    assert_eq!(
+        read_live_byte_by_byte(INTERLEAVED_REPORTS),
+        interleaved_events()
+    );
+}
+
+#[test]
+fn separate_live_escape_presses_are_preserved() {
+    let (mut source, mut writer) = source_with_input();
+    writer.write_all(b"\x1b").unwrap();
+    assert_eq!(
+        source.try_read(Some(Duration::from_millis(1))).unwrap(),
+        None
+    );
+    writer.write_all(b"\x1b").unwrap();
+    let escape = Some(InternalEvent::Event(Event::Key(KeyCode::Esc.into())));
+    assert_eq!(
+        [
+            source.try_read(Some(Duration::from_millis(100))).unwrap(),
+            source.try_read(Some(Duration::from_millis(100))).unwrap(),
+        ],
+        [escape.clone(), escape]
     );
 }

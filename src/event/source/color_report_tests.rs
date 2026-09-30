@@ -1,7 +1,7 @@
 //! Terminal color reports interleaved with typed input surface as events and never become keys.
 
 use std::io::Write;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::tests::source_with_input;
 use super::Parser;
@@ -111,5 +111,27 @@ fn separate_live_escape_presses_are_preserved() {
             source.try_read(Some(Duration::from_millis(100))).unwrap(),
         ],
         [escape.clone(), escape]
+    );
+}
+
+#[test]
+fn expired_live_escape_is_a_key_before_later_input() {
+    let (mut source, mut writer) = source_with_input();
+    let key = |code: KeyCode| Some(InternalEvent::Event(Event::Key(code.into())));
+    writer.write_all(b"a\x1b").unwrap();
+    assert_eq!(
+        source.try_read(Some(Duration::from_millis(10))).unwrap(),
+        key(KeyCode::Char('a'))
+    );
+
+    // A slow consumer polls again only after the Escape window has passed.
+    source.parser.pending_escape_deadline = Some(Instant::now());
+    writer.write_all(b"x").unwrap();
+    assert_eq!(
+        [
+            source.try_read(Some(Duration::from_millis(10))).unwrap(),
+            source.try_read(Some(Duration::from_millis(10))).unwrap(),
+        ],
+        [key(KeyCode::Esc), key(KeyCode::Char('x'))]
     );
 }

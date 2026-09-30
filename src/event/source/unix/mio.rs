@@ -110,8 +110,7 @@ impl EventSource for UnixInternalEventSource {
                             match self.tty_fd.read(&mut self.tty_buffer) {
                                 Ok(read_count) => {
                                     if read_count > 0 {
-                                        self.parser
-                                            .buffer_external_input(&self.tty_buffer[..read_count]);
+                                        self.parser.advance_live(&self.tty_buffer[..read_count]);
                                     }
                                 }
                                 Err(e) => {
@@ -205,6 +204,8 @@ struct Parser {
     buffer: Vec<u8>,
     internal_events: VecDeque<InternalEvent>,
     pending_escape_deadline: Option<Instant>,
+    /// Whether the pending Escape ended a live read rather than replayed input.
+    pending_escape_is_live: bool,
     discarded_sequence: Option<DiscardedSequence>,
 }
 
@@ -240,6 +241,7 @@ impl Default for Parser {
             // is processed -> events pushed.
             internal_events: VecDeque::with_capacity(128),
             pending_escape_deadline: None,
+            pending_escape_is_live: false,
             discarded_sequence: None,
         }
     }
@@ -284,13 +286,28 @@ impl Parser {
 
     /// Parse terminal input, holding a trailing lone Escape for a bounded continuation window.
     ///
-    /// A read boundary cannot tell the Escape key from the start of a control sequence, so live
-    /// reads and replayed input share this path.
+    /// A read boundary cannot tell the Escape key from the start of a control sequence. Replayed
+    /// input keeps an expired Escape for a continuation that is already available.
     fn buffer_external_input(&mut self, buffer: &[u8]) {
+        self.pending_escape_is_live = false;
         self.advance(buffer, true);
         if self.buffer.as_slice() == b"\x1b" {
             self.pending_escape_deadline = Some(Instant::now() + BUFFERED_ESCAPE_TIMEOUT);
         }
+    }
+
+    /// Parse bytes read from the terminal.
+    ///
+    /// A live Escape whose window expired before these bytes were parsed is a key press, however
+    /// late the consumer polls, so it is emitted before the new input.
+    fn advance_live(&mut self, buffer: &[u8]) {
+        if self.pending_escape_is_live {
+            if let Some(event) = self.finish_pending_escape() {
+                self.internal_events.push_back(event);
+            }
+        }
+        self.buffer_external_input(buffer);
+        self.pending_escape_is_live = self.pending_escape_deadline.is_some();
     }
 
     fn poll_timeout(&self, timeout: Option<Duration>) -> Option<Duration> {

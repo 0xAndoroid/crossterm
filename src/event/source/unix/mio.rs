@@ -298,10 +298,10 @@ impl Parser {
 
     /// Parse bytes read from the terminal.
     ///
-    /// A live Escape whose window expired before these bytes were parsed is a key press, however
-    /// late the consumer polls, so it is emitted before the new input.
+    /// A late read cannot tell when its bytes arrived. An expired live Escape still introduces a
+    /// CSI, OSC or SS3 sequence queued behind it; before any other byte it was a key press.
     fn advance_live(&mut self, buffer: &[u8]) {
-        if self.pending_escape_is_live {
+        if self.pending_escape_is_live && !matches!(buffer.first(), Some(b'[' | b']' | b'O')) {
             if let Some(event) = self.finish_pending_escape() {
                 self.internal_events.push_back(event);
             }

@@ -68,7 +68,7 @@ pub(crate) struct EventFilter;
 impl Filter for EventFilter {
     #[cfg(unix)]
     fn eval(&self, event: &InternalEvent) -> bool {
-        matches!(*event, InternalEvent::Event(_))
+        matches!(*event, InternalEvent::Event(_)) || event.color_report().is_some()
     }
 
     #[cfg(windows)]
@@ -134,6 +134,23 @@ mod tests {
     fn test_event_filter_filters_events() {
         assert!(EventFilter.eval(&InternalEvent::Event(Event::Resize(10, 10))));
         assert!(!EventFilter.eval(&InternalEvent::CursorPosition(0, 0)));
+    }
+
+    #[test]
+    fn test_event_filter_accepts_default_color_reports() {
+        let rgb = OscColorPayload::Rgb { r: 1, g: 2, b: 3 };
+        assert!(EventFilter.eval(&OscColor {
+            slot: 10,
+            payload: rgb.clone()
+        }));
+        assert!(EventFilter.eval(&OscColor {
+            slot: 11,
+            payload: rgb
+        }));
+        assert!(!EventFilter.eval(&OscColor {
+            slot: 11,
+            payload: OscColorPayload::Unrecognized("?".to_string())
+        }));
     }
 
     #[test]

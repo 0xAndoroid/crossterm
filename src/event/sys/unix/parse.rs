@@ -1,8 +1,9 @@
 use std::io;
 
 use crate::event::{
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, KeyboardEnhancementFlags,
-    MediaKeyCode, ModifierKeyCode, MouseButton, MouseEvent, MouseEventKind,
+    ColorReport, ColorScheme, Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers,
+    KeyboardEnhancementFlags, MediaKeyCode, ModifierKeyCode, MouseButton, MouseEvent,
+    MouseEventKind,
 };
 
 use crate::event::{InternalEvent, OscColorPayload};
@@ -234,6 +235,7 @@ pub(crate) fn parse_csi(buffer: &[u8]) -> io::Result<Option<InternalEvent>> {
         b'?' => match buffer[buffer.len() - 1] {
             b'u' => return parse_csi_keyboard_enhancement_flags(buffer),
             b'c' => return parse_csi_primary_device_attributes(buffer),
+            b'n' => return Ok(parse_csi_color_scheme(buffer)),
             _ => None,
         },
         b'0'..=b'9' => {
@@ -308,6 +310,19 @@ pub(crate) fn parse_csi_cursor_position(buffer: &[u8]) -> io::Result<Option<Inte
     let x = next_parsed::<u16>(&mut split)? - 1;
 
     Ok(Some(InternalEvent::CursorPosition(x, y)))
+}
+
+/// Parses a DEC mode 2031 color-scheme report; other device status reports are ignored.
+fn parse_csi_color_scheme(buffer: &[u8]) -> Option<InternalEvent> {
+    // ESC [ ? 997 ; Ps n, where Ps is 1 for dark and 2 for light
+    let scheme = match &buffer[3..buffer.len() - 1] {
+        b"997;1" => ColorScheme::Dark,
+        b"997;2" => ColorScheme::Light,
+        _ => return None,
+    };
+    Some(InternalEvent::Event(Event::ColorReport(
+        ColorReport::ColorScheme(scheme),
+    )))
 }
 
 fn parse_csi_keyboard_enhancement_flags(buffer: &[u8]) -> io::Result<Option<InternalEvent>> {
@@ -1585,6 +1600,24 @@ mod tests {
             }
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_parse_csi_color_scheme_reports() {
+        assert_eq!(
+            parse_event(b"\x1B[?997;1n", false).unwrap(),
+            Some(InternalEvent::Event(Event::ColorReport(
+                ColorReport::ColorScheme(ColorScheme::Dark)
+            ))),
+        );
+        assert_eq!(
+            parse_event(b"\x1B[?997;2n", false).unwrap(),
+            Some(InternalEvent::Event(Event::ColorReport(
+                ColorReport::ColorScheme(ColorScheme::Light)
+            ))),
+        );
+        assert_eq!(parse_event(b"\x1B[?997;3n", false).unwrap(), None);
+        assert_eq!(parse_event(b"\x1B[?10n", false).unwrap(), None);
     }
 
     #[test]

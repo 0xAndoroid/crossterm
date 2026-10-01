@@ -160,10 +160,7 @@ impl EventSource for UnixInternalEventSource {
                 loop {
                     let read_count = read_complete(&self.tty, &mut self.tty_buffer)?;
                     if read_count > 0 {
-                        self.parser.advance(
-                            &self.tty_buffer[..read_count],
-                            read_count == TTY_BUFFER_SIZE,
-                        );
+                        self.parser.advance_live(&self.tty_buffer[..read_count]);
                     }
 
                     if let Some(event) = self.parser.next() {
@@ -251,6 +248,8 @@ struct Parser {
     buffer: Vec<u8>,
     internal_events: VecDeque<InternalEvent>,
     pending_escape_deadline: Option<Instant>,
+    /// Whether the pending Escape ended a live read rather than replayed input.
+    pending_escape_is_live: bool,
     discarded_sequence: Option<DiscardedSequence>,
 }
 
@@ -286,6 +285,7 @@ impl Default for Parser {
             // is processed -> events pushed.
             internal_events: VecDeque::with_capacity(128),
             pending_escape_deadline: None,
+            pending_escape_is_live: false,
             discarded_sequence: None,
         }
     }
@@ -328,11 +328,29 @@ impl Parser {
         }
     }
 
+    /// Parse terminal input, holding a trailing lone Escape for a bounded continuation window.
+    ///
+    /// A read boundary cannot tell the Escape key from the start of a control sequence. Replayed
+    /// input keeps an expired Escape for a continuation that is already available.
     fn buffer_external_input(&mut self, buffer: &[u8]) {
+        self.pending_escape_is_live = false;
         self.advance(buffer, true);
         if self.buffer.as_slice() == b"\x1b" {
             self.pending_escape_deadline = Some(Instant::now() + BUFFERED_ESCAPE_TIMEOUT);
         }
+    }
+
+    /// Parse bytes read from the terminal.
+    fn advance_live(&mut self, buffer: &[u8]) {
+        // Even after the hold expired, a queued `[`, `]` or `O` joins the Escape: a stopped process
+        // reads both at once, and like every terminal program treats them as one sequence.
+        if self.pending_escape_is_live && !matches!(buffer.first(), Some(b'[' | b']' | b'O')) {
+            if let Some(event) = self.finish_pending_escape() {
+                self.internal_events.push_back(event);
+            }
+        }
+        self.buffer_external_input(buffer);
+        self.pending_escape_is_live = self.pending_escape_deadline.is_some();
     }
 
     fn poll_timeout(&self, timeout: Option<Duration>) -> Option<Duration> {
@@ -440,6 +458,15 @@ impl Parser {
             }
             let more = idx + 1 < buffer.len() || more;
 
+            // A pending Escape followed by another Escape is a separate key press; the
+            // stateless parser would otherwise read ESC ESC as one Escape.
+            if self.buffer.as_slice() == b"\x1b" && *byte == b'\x1b' {
+                self.internal_events
+                    .push_back(InternalEvent::Event(Event::Key(
+                        crate::event::KeyCode::Esc.into(),
+                    )));
+                self.buffer.clear();
+            }
             self.buffer.push(*byte);
 
             match parse_event(&self.buffer, more) {
@@ -482,6 +509,10 @@ impl Iterator for Parser {
 }
 
 #[cfg(test)]
+#[path = "../color_report_tests.rs"]
+mod color_report_tests;
+
+#[cfg(test)]
 #[path = "../secondary_device_attributes_tests.rs"]
 mod secondary_device_attributes_tests;
 
@@ -492,7 +523,7 @@ mod tests {
     use crate::terminal::sys::file_descriptor::FileDesc;
     use std::{io::Write, os::unix::net::UnixStream};
 
-    fn source_with_input() -> (UnixInternalEventSource, UnixStream) {
+    pub(super) fn source_with_input() -> (UnixInternalEventSource, UnixStream) {
         let (reader, writer) = UnixStream::pair().unwrap();
         #[cfg(feature = "libc")]
         let reader = {

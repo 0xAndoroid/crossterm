@@ -54,6 +54,7 @@
 //!             #[cfg(feature = "bracketed-paste")]
 //!             Event::Paste(data) => println!("{:?}", data),
 //!             Event::Resize(width, height) => println!("New size {}x{}", width, height),
+//!             Event::ColorReport(report) => println!("{:?}", report),
 //!         }
 //!     }
 //!     execute!(
@@ -100,6 +101,7 @@
 //!                 #[cfg(feature = "bracketed-paste")]
 //!                 Event::Paste(data) => println!("Pasted {:?}", data),
 //!                 Event::Resize(width, height) => println!("New size {}x{}", width, height),
+//!                 Event::ColorReport(report) => println!("{:?}", report),
 //!             }
 //!         } else {
 //!             // Timeout expired and no `Event` is available
@@ -136,7 +138,7 @@ use crate::event::{
     read::InternalEventReader,
     timeout::PollTimeout,
 };
-use crate::{csi, Command};
+use crate::{csi, style::Color, Command};
 use parking_lot::{MappedMutexGuard, Mutex, MutexGuard};
 use std::fmt::{self, Display};
 use std::time::Duration;
@@ -247,10 +249,9 @@ pub fn poll(timeout: Duration) -> std::io::Result<bool> {
 /// }
 /// ```
 pub fn read() -> std::io::Result<Event> {
-    match read_internal(&EventFilter)? {
-        InternalEvent::Event(event) => Ok(event),
-        #[cfg(unix)]
-        _ => unreachable!(),
+    match read_internal(&EventFilter)?.into_event() {
+        Some(event) => Ok(event),
+        None => unreachable!(),
     }
 }
 
@@ -608,6 +609,34 @@ pub enum Event {
     /// An resize event with new dimensions after resize (columns, rows).
     /// **Note** that resize events can occur in batches.
     Resize(u16, u16),
+    /// A color report sent by the terminal.
+    ///
+    /// Terminals send OSC 10/11 reports in reply to default-color queries, and color-scheme
+    /// reports while DEC private mode 2031 is enabled.
+    ColorReport(ColorReport),
+}
+
+/// A color report sent by the terminal.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, PartialOrd, PartialEq, Eq, Clone, Copy, Hash)]
+pub enum ColorReport {
+    /// The terminal's default foreground color, reported by OSC 10.
+    ForegroundColor(Color),
+    /// The terminal's default background color, reported by OSC 11.
+    BackgroundColor(Color),
+    /// The terminal's color scheme, reported by `CSI ? 997 ; 1 n` (dark) or
+    /// `CSI ? 997 ; 2 n` (light).
+    ColorScheme(ColorScheme),
+}
+
+/// A terminal color scheme.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, PartialOrd, PartialEq, Eq, Clone, Copy, Hash)]
+pub enum ColorScheme {
+    /// Light text on a dark background.
+    Dark,
+    /// Dark text on a light background.
+    Light,
 }
 
 impl Event {
@@ -1532,6 +1561,33 @@ pub(crate) enum InternalEvent {
     /// OSC color response (`slot`, `payload`).
     #[cfg(unix)]
     OscColor { slot: u8, payload: OscColorPayload },
+}
+
+impl InternalEvent {
+    /// Returns the public form of an event accepted by [`EventFilter`].
+    pub(crate) fn into_event(self) -> Option<Event> {
+        match self {
+            InternalEvent::Event(event) => Some(event),
+            #[cfg(unix)]
+            event => event.color_report().map(Event::ColorReport),
+        }
+    }
+
+    /// Returns the default-color report carried by a valid OSC 10/11 response.
+    #[cfg(unix)]
+    pub(crate) fn color_report(&self) -> Option<ColorReport> {
+        match *self {
+            InternalEvent::OscColor {
+                slot: 10,
+                payload: OscColorPayload::Rgb { r, g, b },
+            } => Some(ColorReport::ForegroundColor(Color::Rgb { r, g, b })),
+            InternalEvent::OscColor {
+                slot: 11,
+                payload: OscColorPayload::Rgb { r, g, b },
+            } => Some(ColorReport::BackgroundColor(Color::Rgb { r, g, b })),
+            _ => None,
+        }
+    }
 }
 
 /// Parsed payload of an OSC color response.
